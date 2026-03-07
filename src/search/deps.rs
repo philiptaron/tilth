@@ -43,8 +43,8 @@ pub struct LocalDep {
 /// A file that depends on the target, with symbol-level call detail.
 pub struct Dependent {
     pub path: PathBuf,
-    /// (`calling_function`, `called_symbol`) pairs.
-    pub symbols: Vec<(String, String)>,
+    /// (`calling_function`, `called_symbol`, `line`) triples.
+    pub symbols: Vec<(String, String, u32)>,
     pub is_test: bool,
 }
 
@@ -178,7 +178,7 @@ pub fn analyze_deps(
         let raw_matches = find_callers_batch(&symbols_set, scope, bloom)?;
 
         // Group by file path
-        let mut by_file: HashMap<PathBuf, Vec<(String, String)>> = HashMap::new();
+        let mut by_file: HashMap<PathBuf, Vec<(String, String, u32)>> = HashMap::new();
         for (matched_symbol, caller_match) in raw_matches {
             // Exclude calls from within the target file itself (self-references)
             if caller_match.path == *path {
@@ -187,7 +187,7 @@ pub fn analyze_deps(
             by_file
                 .entry(caller_match.path)
                 .or_default()
-                .push((caller_match.calling_function, matched_symbol));
+                .push((caller_match.calling_function, matched_symbol, caller_match.line));
         }
 
         // Build Dependent list
@@ -466,19 +466,22 @@ fn format_used_by(deps: &[&Dependent], scope: &Path, heading: &str) -> String {
             .unwrap_or(&dep.path)
             .display()
             .to_string();
-        // Group by calling function for readability
-        let mut by_caller: HashMap<&str, Vec<&str>> = HashMap::new();
-        for (caller, symbol) in &dep.symbols {
-            by_caller
-                .entry(caller.as_str())
-                .or_default()
-                .push(symbol.as_str());
+        // Group by (caller, line) for readability — keep the earliest line per caller
+        let mut by_caller: HashMap<&str, (u32, Vec<&str>)> = HashMap::new();
+        for (caller, symbol, line) in &dep.symbols {
+            let entry = by_caller.entry(caller.as_str()).or_insert((*line, Vec::new()));
+            entry.0 = entry.0.min(*line);
+            entry.1.push(symbol.as_str());
         }
-        let mut callers: Vec<&str> = by_caller.keys().copied().collect();
-        callers.sort_unstable();
-        for caller in callers {
-            let syms = by_caller[caller].join(", ");
-            let _ = write!(out, "\n{rel:<30} {caller:<20} \u{2192} {syms}");
+        let mut callers: Vec<(&str, u32, Vec<&str>)> = by_caller
+            .into_iter()
+            .map(|(caller, (line, syms))| (caller, line, syms))
+            .collect();
+        callers.sort_unstable_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+        for (caller, line, syms) in callers {
+            let loc = format!("{rel}:{line}");
+            let joined = syms.join(", ");
+            let _ = write!(out, "\n{loc:<30} {caller:<20} \u{2192} {joined}");
         }
     }
     out
