@@ -43,10 +43,9 @@ pub fn run(host: &str, edit: bool) -> Result<(), String> {
             .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
     }
 
-    if host == "codex" {
-        write_codex_toml(&host_info, edit)?;
-    } else {
-        write_json_config(&host_info, edit)?;
+    match host_info.format {
+        ConfigFormat::Json { .. } => write_json_config(&host_info, edit)?,
+        ConfigFormat::Toml => write_toml_config(&host_info, edit)?,
     }
 
     if edit {
@@ -61,6 +60,11 @@ pub fn run(host: &str, edit: bool) -> Result<(), String> {
 }
 
 fn write_json_config(host_info: &HostInfo, edit: bool) -> Result<(), String> {
+    let servers_key = match host_info.format {
+        ConfigFormat::Json { servers_key } => servers_key,
+        ConfigFormat::Toml => unreachable!("write_json_config called for TOML host"),
+    };
+
     let mut config: Value = if host_info.path.exists() {
         let raw = fs::read_to_string(&host_info.path)
             .map_err(|e| format!("failed to read {}: {e}", host_info.path.display()))?;
@@ -69,8 +73,6 @@ fn write_json_config(host_info: &HostInfo, edit: bool) -> Result<(), String> {
     } else {
         json!({})
     };
-
-    let servers_key = host_info.servers_key;
 
     config
         .as_object_mut()
@@ -88,16 +90,18 @@ fn write_json_config(host_info: &HostInfo, edit: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Codex CLI uses TOML config at ~/.codex/config.toml.
-/// Appends/replaces the `[mcp_servers.tilth]` section.
-fn write_codex_toml(host_info: &HostInfo, edit: bool) -> Result<(), String> {
+/// Writes a `[mcp_servers.tilth]` section into a TOML config file.
+fn write_toml_config(host_info: &HostInfo, edit: bool) -> Result<(), String> {
     let (command, args) = tilth_command_and_args(edit);
 
-    // Build the TOML section
-    let args_toml: Vec<String> = args.iter().map(|a| format!("\"{a}\"")).collect();
+    // Escape backslashes for TOML basic strings (Windows paths like C:\Users\...).
+    let command_escaped = command.replace('\\', "\\\\");
+    let args_toml: Vec<String> = args
+        .iter()
+        .map(|a| format!("\"{}\"", a.replace('\\', "\\\\")))
+        .collect();
     let section = format!(
-        "[mcp_servers.tilth]\ncommand = \"{}\"\nargs = [{}]\n",
-        command,
+        "[mcp_servers.tilth]\ncommand = \"{command_escaped}\"\nargs = [{}]\n",
         args_toml.join(", ")
     );
 
@@ -156,10 +160,16 @@ fn tilth_command_and_args(edit: bool) -> (String, Vec<String>) {
     }
 }
 
+enum ConfigFormat {
+    /// JSON with a configurable servers key ("mcpServers" or "servers").
+    Json { servers_key: &'static str },
+    /// TOML with `[mcp_servers.<name>]` sections.
+    Toml,
+}
+
 struct HostInfo {
     path: PathBuf,
-    /// JSON key holding the servers map ("mcpServers" or "servers").
-    servers_key: &'static str,
+    format: ConfigFormat,
     /// Optional note printed after success.
     note: Option<&'static str>,
 }
@@ -172,34 +182,44 @@ fn resolve_host(host: &str) -> Result<HostInfo, String> {
         // Available in all projects without checking into source control.
         "claude-code" => Ok(HostInfo {
             path: home.join(".claude.json"),
-            servers_key: "mcpServers",
+            format: ConfigFormat::Json {
+                servers_key: "mcpServers",
+            },
             note: Some("User scope — available in all projects."),
         }),
 
         // Cursor global: ~/.cursor/mcp.json → mcpServers
         "cursor" => Ok(HostInfo {
             path: home.join(".cursor/mcp.json"),
-            servers_key: "mcpServers",
+            format: ConfigFormat::Json {
+                servers_key: "mcpServers",
+            },
             note: None,
         }),
 
         // Windsurf global: ~/.codeium/windsurf/mcp_config.json → mcpServers
         "windsurf" => Ok(HostInfo {
             path: home.join(".codeium/windsurf/mcp_config.json"),
-            servers_key: "mcpServers",
+            format: ConfigFormat::Json {
+                servers_key: "mcpServers",
+            },
             note: None,
         }),
 
         // VS Code project scope: .vscode/mcp.json → servers (NOT mcpServers)
         "vscode" => Ok(HostInfo {
             path: PathBuf::from(".vscode/mcp.json"),
-            servers_key: "servers",
+            format: ConfigFormat::Json {
+                servers_key: "servers",
+            },
             note: Some("Project scope — run from your project root."),
         }),
 
         "claude-desktop" => Ok(HostInfo {
             path: claude_desktop_path()?,
-            servers_key: "mcpServers",
+            format: ConfigFormat::Json {
+                servers_key: "mcpServers",
+            },
             note: None,
         }),
 
@@ -207,21 +227,25 @@ fn resolve_host(host: &str) -> Result<HostInfo, String> {
         // Verified from opencode source: internal/config/config.go (viper config name ".opencode")
         "opencode" => Ok(HostInfo {
             path: home.join(".opencode.json"),
-            servers_key: "mcpServers",
+            format: ConfigFormat::Json {
+                servers_key: "mcpServers",
+            },
             note: Some("User scope — available in all projects."),
         }),
 
         // Gemini CLI user scope: ~/.gemini/settings.json → mcpServers
         "gemini" => Ok(HostInfo {
             path: home.join(".gemini/settings.json"),
-            servers_key: "mcpServers",
+            format: ConfigFormat::Json {
+                servers_key: "mcpServers",
+            },
             note: Some("User scope — available in all projects."),
         }),
 
         // Codex CLI user scope: ~/.codex/config.toml → [mcp_servers.tilth] (TOML)
         "codex" => Ok(HostInfo {
             path: home.join(".codex/config.toml"),
-            servers_key: "mcp_servers",
+            format: ConfigFormat::Toml,
             note: Some("User scope — available in all projects."),
         }),
 
