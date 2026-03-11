@@ -68,6 +68,7 @@ enum Command {
 }
 
 fn main() {
+    configure_thread_pools();
     let cli = Cli::parse();
 
     // Shell completions
@@ -184,4 +185,24 @@ fn terminal_height() -> usize {
     }
     // Fallback
     24
+}
+
+/// Configure rayon global thread pool to limit CPU usage.
+///
+/// Defaults to min(cores / 2, 6). Override with `TILTH_THREADS` env var.
+/// This matters for long-lived MCP sessions where back-to-back searches
+/// can sustain high CPU (see #27).
+fn configure_thread_pools() {
+    let num_threads = std::env::var("TILTH_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map_or(4, |n| (n.get() / 2).clamp(2, 6))
+        });
+
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .build_global()
+        .ok();
 }
